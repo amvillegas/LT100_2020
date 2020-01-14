@@ -1,0 +1,10 @@
+\frametitle{Implementation in \textbf {iMoMo}}
+
+\begin{Shaded}
+\begin{Highlighting}[]
+ \KeywordTok{plot}\NormalTok{(APCifit, }\DataTypeTok{parametricbx =} \OtherTok{FALSE}\NormalTok{)}
+\end{Highlighting}
+\end{Shaded}
+
+\begin{center}\includegraphics[width=10cm]{Mortality_Modelling_with_R_files/figure-beamer/plotAPCi-1} \end{center}
+

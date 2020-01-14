@@ -1,0 +1,1824 @@
+---
+title: 'Mortality Modelling with R'
+author: |
+  | Andrés M. Villegas
+  | \textcolor{white}{white}
+  | \footnotesize School of Risk and Actuarial Studies, UNSW Sydney
+  | \textcolor{white}{white}
+  | \textcolor{white}{white}
+  | \includegraphics[width = 6cm]{logocepar.png}
+  | \textcolor{white}{white}
+  | \textcolor{white}{white}
+  | 15 January 2020, Living to 100 Symposium
+  | Orlando, Florida
+output: beamer_presentation
+geometry: margin=1cm
+template: defaultTop.tex
+header-includes:
+    - \definecolor{CEPAR}{RGB}{192, 8, 31}  
+    - \setbeamercolor{structure}{fg=CEPAR}
+    - \widowpenalties 1 150
+    - \usepackage[orientation=landscape,size=custom,width=16,height=9,scale=0.5,debug]{beamerposter}
+    - \DeclareMathOperator{\logit}{logit}
+    - \newcommand{\ei}{\end{itemize}}
+    - \newcommand{\bi}{\begin{itemize}}
+    - \newcommand{\red}[1]{{\color{CEPAR} {#1}}}
+    - \newcommand{\ra}{\red{$\leadsto$}\ }
+    - \usepackage{booktabs}
+    - \usepackage{animate}
+includes:
+  before_body: doc_prefix.txt
+  in_header: header.txt
+bibliography: bibliography.bib
+nocite: | 
+  @Brouhns2005, @Koissi2006
+---
+
+
+```{r lineWidthHook, eval=TRUE,echo = FALSE}
+#Hook to control the line width in ouputs
+library(knitr)
+hook_output = knit_hooks$get('output')
+knit_hooks$set(output = function(x, options) {
+  # this hook is used only when the linewidth option is not NULL
+  if (!is.null(n <- options$linewidth)) {
+    x = knitr:::split_lines(x)
+    # any lines wider than n should be wrapped
+    if (any(nchar(x) > n)) x = strwrap(x, width = n)
+    x = paste(x, collapse = '\n')
+  }
+  hook_output(x, options)
+})
+```
+
+# Aims
+
+Gain familiarity with use of the `R` packages **demography**, **StMoMo** and **lifecontingencies** to:
+
+- Obtain mortality data from Human Mortality Database
+- Fit stochastic mortality models (including Lee-Carter model)
+- Compare goodness of fit of mortality models
+- Forecast future mortality rates (deterministic and using Monte Carlo simulations)
+- Compute demographic and actuarial quantities
+
+# Agenda
+
+- Motivation 
+- Review of mortality modelling metodologies
+- Mortality modelling with `R`
+    - Downloading mortality data with **demography**
+    - Fitting, comparing and projecting mortality model with **StMoMo**
+    - Turning mortality projections into demographic calculations with **lifecontingencies**
+- Conclusions and Summary
+- Preview of recent **StMoMo** developments (if time permits!)
+
+
+----
+
+\vspace{3cm}
+\begin{center}
+\text{{\Huge\color{CEPAR} Motivation and Review}}
+
+\text{{\Huge\color{CEPAR}  of Mortality Modelling}}
+\end{center}
+\vspace{3cm}
+
+
+# Recent trends in mortality and life expectancy 
+
+```{r mortalitytrends, eval=TRUE,  fig.width=12, fig.height=3.5, out.width="14.5cm", results='hide', warning=FALSE, message=FALSE, cache=TRUE, echo=FALSE}
+library(wpp2017)
+library(tidyverse)
+library(ggplot2)
+library(cowplot)
+
+
+data(e0F)
+data(mxF)
+
+LEDf <- e0F %>%  gather("year", "LE0", 3:15) %>% 
+  rename(Region = name)
+
+mxDf <- mxF %>%  gather("year", "LE0", 4:33) %>% 
+  rename(Region = name)
+
+
+
+countries <- c("WORLD", "ASIA", "LATIN AMERICA AND THE CARIBBEAN", "AFRICA", 
+               "EUROPE", "NORTHERN AMERICA", "OCEANIA", "Australia")
+# years <- paste(seq(1950,2045,5),seq(1955,2050,5), sep = "-")
+years <- paste(seq(1950,2010,5),seq(1955,2015,5), sep = "-")
+
+plotLE <- ggplot(filter(LEDf, Region %in% countries & year %in% years)) +
+  geom_line(aes(x=year, y = LE0, group = Region, colour = Region)) +
+  geom_point(aes(x=year, y = LE0, group = Region, colour = Region,
+                 shape = Region)) +  theme_bw() + 
+  labs(title = "Period Life Expectancy at brith (Females)", y = "Life Expectancy (years)",
+       x = NULL) +
+  theme(axis.text.x=element_text(angle=45,hjust=1)) 
+
+
+plotMx <- ggplot(filter(mxDf, Region %in% countries & year %in% years & age == 60)) +
+  geom_line(aes(x=year, y = LE0, group = Region, colour = Region)) +
+  geom_point(aes(x=year, y = LE0, group = Region, colour = Region,
+                 shape = Region)) +  theme_bw() + 
+  labs(title = "Mortality rate at age 60-64 (Females)", y = "mortality rate",
+       x = NULL) +
+  theme(axis.text.x=element_text(angle=45,hjust=1)) + ylim(c(0, NA))
+
+
+legend <- get_legend(plotMx)
+
+plotMx <- plotMx +  theme(legend.position='none')
+plotLE <- plotLE +  theme(legend.position='none')
+
+plot_grid(plotMx, plotLE, legend, ncol=3)
+
+```
+
+\footnotesize Source: United Nations World Population Prospects 2017
+
+\normalsize
+
+- Good-news!
+- Important social and financial implications for governments, insurers, individuals.
+- Need to model and project these trends
+
+
+# Mortality forecasting methodologies
+
+A good overview of methodologies is given in the review papers by  @Booth2008, @Wong-Fupuy2004, @Pitacco2004 and in the  by @Pitacco2009
+
+- Expert based
+
+- Explanatory
+    - Structural Modelling (Explanatory or Econometric).
+    - Cause of death decomposition
+
+- **Extrapolation**
+    - Trend modelling
+
+
+# A timeline of "recent" mortality modelling methodologies
+
+\centering 
+\includegraphics[width = \textwidth]{FiguresPreliminaries/Timeline}
+
+
+# Advances in single population mortality modelling
+
+* **Lee-Carter model** [@Lee1992] 
+    + Add more bilinear age-period components [@Renshaw2003a]
+    + Add a cohort effect [@Renshaw2006]
+* Two factor **CBD model** [@Cairns2006a]
+    + Add cohort effect, quadratic age term [@Cairns2009] 
+    + Combine with features of the Lee-Carter [@Plat2009a]
+* **Many more models** proposed in the literature (e.g. @Aro2011, @OHare2012, @Borger2013, @Alai2014b)
+
+```{r downloadUSdata, eval=TRUE,echo = FALSE, message=FALSE, warning=FALSE, cache = TRUE}
+library(StMoMo)
+library(demography) 
+USdata <- hmd.mx(country = "USA", username = "a.villegas@unsw.edu.au", password = "hmd")
+Ext <- USdata$pop$male 
+Dxt <- USdata$rate$male * Ext
+Dxt <- Dxt[, as.character(1933:2017)]
+Ext <- Ext[, as.character(1933:2017)]
+years <- 1933:2017
+```
+
+
+# Lee-Carter model
+
+\centering
+
+```{r plotEWAni1933, eval=TRUE,  fig.width=7, fig.height=4.5,out.width="10cm", results='hide', warning=FALSE, message=FALSE, cache=TRUE, echo=FALSE, dependson=c("downloadUSdata")}
+ matplot(USdata$age, log(Dxt / Ext)[,1:1], type = "l", 
+         lty = 1, col = 'black', xlab = "age", ylab = "log death rates", 
+         main = "USA: male death rates (1933)", ylim = c(-10, 0))
+ lines(USdata$age, log(Dxt / Ext)[,1], lwd = 2)
+
+```
+$${\color{white}\log \mu_{xt} \quad =}\quad {\color{white}\alpha_x}  \quad{\color{white}+}\quad {\color{white}\sum_{i=1}^N} {\color{white} \beta_x^{{\color{white}(i)}}}{\color{white}\kappa_t}^{{\color{white}(i)}} \quad{\color{white}+}\quad {\color{white}\beta_x^{(0)}}{\color{white}\gamma_{t-x}}$$
+
+
+
+# Lee-Carter model
+
+\centering
+
+```{r plotEWAni1935, eval=TRUE,  fig.width=7, fig.height=4.5,out.width="10cm", results='hide', warning=FALSE, message=FALSE, cache=TRUE, echo=FALSE, dependson=c("downloadUSdata")}
+ matplot(USdata$age, log(Dxt / Ext)[,1:2], type = "l", 
+         lty = 1, col = 'grey', xlab = "age", ylab = "log death rates", 
+         main = "USA: male death rates (1935)", ylim = c(-10, 0))
+ lines(USdata$age, log(Dxt / Ext)[,3], lwd = 2)
+
+```
+$${\color{white}\log \mu_{xt} \quad =}\quad {\color{white}\alpha_x}  \quad{\color{white}+}\quad {\color{white}\sum_{i=1}^N} {\color{white} \beta_x^{{\color{white}(i)}}}{\color{white}\kappa_t}^{{\color{white}(i)}} \quad{\color{white}+}\quad {\color{white}\beta_x^{(0)}}{\color{white}\gamma_{t-x}}$$
+
+# Lee-Carter model
+
+\centering
+
+```{r plotEWAni1940, eval=TRUE,  fig.width=7, fig.height=4.5,out.width="10cm", results='hide', warning=FALSE, message=FALSE, cache=TRUE, echo=FALSE, dependson=c("downloadUSdata")}
+ matplot(USdata$age, log(Dxt / Ext)[,1:7], type = "l", 
+         lty = 1, col = 'grey', xlab = "age", ylab = "log death rates", 
+         main = "USA: male death rates (1940)", ylim = c(-10, 0))
+ lines(USdata$age, log(Dxt / Ext)[,8], lwd = 2)
+
+```
+$${\color{white}\log \mu_{xt} \quad =}\quad {\color{white}\alpha_x}  \quad{\color{white}+}\quad {\color{white}\sum_{i=1}^N} {\color{white} \beta_x^{{\color{white}(i)}}}{\color{white}\kappa_t}^{{\color{white}(i)}} \quad{\color{white}+}\quad {\color{white}\beta_x^{(0)}}{\color{white}\gamma_{t-x}}$$
+
+# Lee-Carter model
+
+\centering
+
+```{r plotEWAni1945, eval=TRUE,  fig.width=7, fig.height=4.5,out.width="10cm", results='hide', warning=FALSE, message=FALSE, cache=TRUE, echo=FALSE, dependson=c("downloadUSdata")}
+ matplot(USdata$age, log(Dxt / Ext)[,1:12], type = "l", 
+         lty = 1, col = 'grey', xlab = "age", ylab = "log death rates", 
+         main = "USA: male death rates (1945)", ylim = c(-10, 0))
+ lines(USdata$age, log(Dxt / Ext)[,13], lwd = 2)
+
+```
+$${\color{white}\log \mu_{xt} \quad =}\quad {\color{white}\alpha_x}  \quad{\color{white}+}\quad {\color{white}\sum_{i=1}^N} {\color{white} \beta_x^{{\color{white}(i)}}}{\color{white}\kappa_t}^{{\color{white}(i)}} \quad{\color{white}+}\quad {\color{white}\beta_x^{(0)}}{\color{white}\gamma_{t-x}}$$
+
+# Lee-Carter model
+
+\centering
+
+```{r plotEWAni1950, eval=TRUE,  fig.width=7, fig.height=4.5,out.width="10cm", results='hide', warning=FALSE, message=FALSE, cache=TRUE, echo=FALSE, dependson=c("downloadUSdata")}
+ matplot(USdata$age, log(Dxt / Ext)[,1:17], type = "l", 
+         lty = 1, col = 'grey', xlab = "age", ylab = "log death rates", 
+         main = "USA: male death rates (1950)", ylim = c(-10, 0))
+ lines(USdata$age, log(Dxt / Ext)[,10], lwd = 2)
+
+```
+$${\color{white}\log \mu_{xt} \quad =}\quad {\color{white}\alpha_x}  \quad{\color{white}+}\quad {\color{white}\sum_{i=1}^N} {\color{white} \beta_x^{{\color{white}(i)}}}{\color{white}\kappa_t}^{{\color{white}(i)}} \quad{\color{white}+}\quad {\color{white}\beta_x^{(0)}}{\color{white}\gamma_{t-x}}$$
+
+
+# Lee-Carter model
+
+\centering
+
+```{r plotEWAni1955, eval=TRUE,  fig.width=7, fig.height=4.5,out.width="10cm", results='hide', warning=FALSE, message=FALSE, cache=TRUE, echo=FALSE, dependson=c("downloadUSdata")}
+ matplot(USdata$age, log(Dxt / Ext)[,1:22], type = "l", 
+         lty = 1, col = 'grey', xlab = "age", ylab = "log death rates", 
+         main = "USA: male death rates (1955)", ylim = c(-10, 0))
+ lines(USdata$age, log(Dxt / Ext)[,23], lwd = 2)
+
+```
+$${\color{white}\log \mu_{xt} \quad =}\quad {\color{white}\alpha_x}  \quad{\color{white}+}\quad {\color{white}\sum_{i=1}^N} {\color{white} \beta_x^{{\color{white}(i)}}}{\color{white}\kappa_t}^{{\color{white}(i)}} \quad{\color{white}+}\quad {\color{white}\beta_x^{(0)}}{\color{white}\gamma_{t-x}}$$
+
+
+
+# Lee-Carter model
+
+\centering
+
+```{r plotEWAni1960, eval=TRUE,  fig.width=7, fig.height=4.5,out.width="10cm", results='hide', warning=FALSE, message=FALSE, cache=TRUE, echo=FALSE, dependson=c("downloadUSdata")}
+ matplot(USdata$age, log(Dxt / Ext)[,1:27], type = "l", 
+         lty = 1, col = 'grey', xlab = "age", ylab = "log death rates", 
+         main = "USA: male death rates (1960)", ylim = c(-10, 0))
+ lines(USdata$age, log(Dxt / Ext)[,28], lwd = 2)
+
+```
+$${\color{white}\log \mu_{xt} \quad =}\quad {\color{white}\alpha_x}  \quad{\color{white}+}\quad {\color{white}\sum_{i=1}^N} {\color{white} \beta_x^{{\color{white}(i)}}}{\color{white}\kappa_t}^{{\color{white}(i)}} \quad{\color{white}+}\quad {\color{white}\beta_x^{(0)}}{\color{white}\gamma_{t-x}}$$
+
+
+
+# Lee-Carter model
+
+\centering
+
+```{r plotEWAni1965, eval=TRUE,  fig.width=7, fig.height=4.5,out.width="10cm", results='hide', warning=FALSE, message=FALSE, cache=TRUE, echo=FALSE, dependson=c("downloadUSdata")}
+ matplot(USdata$age, log(Dxt / Ext)[,1:32], type = "l", 
+         lty = 1, col = 'grey', xlab = "age", ylab = "log death rates", 
+         main = "USA: male death rates (1965)", ylim = c(-10, 0))
+ lines(USdata$age, log(Dxt / Ext)[,33], lwd = 2)
+
+```
+$${\color{white}\log \mu_{xt} \quad =}\quad {\color{white}\alpha_x}  \quad{\color{white}+}\quad {\color{white}\sum_{i=1}^N} {\color{white} \beta_x^{{\color{white}(i)}}}{\color{white}\kappa_t}^{{\color{white}(i)}} \quad{\color{white}+}\quad {\color{white}\beta_x^{(0)}}{\color{white}\gamma_{t-x}}$$
+
+# Lee-Carter model
+
+\centering
+
+```{r plotEWAni1970, eval=TRUE,  fig.width=7, fig.height=4.5,out.width="10cm", results='hide', warning=FALSE, message=FALSE, cache=TRUE, echo=FALSE, dependson=c("downloadUSdata")}
+ matplot(USdata$age, log(Dxt / Ext)[,1:37], type = "l", 
+         lty = 1, col = 'grey', xlab = "age", ylab = "log death rates", 
+         main = "USA: male death rates (1970)", ylim = c(-10, 0))
+ lines(USdata$age, log(Dxt / Ext)[,38], lwd = 2)
+
+```
+$${\color{white}\log \mu_{xt} \quad =}\quad {\color{white}\alpha_x}  \quad{\color{white}+}\quad {\color{white}\sum_{i=1}^N} {\color{white} \beta_x^{{\color{white}(i)}}}{\color{white}\kappa_t}^{{\color{white}(i)}} \quad{\color{white}+}\quad {\color{white}\beta_x^{(0)}}{\color{white}\gamma_{t-x}}$$
+
+# Lee-Carter model
+
+\centering
+
+```{r plotEWAni1975, eval=TRUE,  fig.width=7, fig.height=4.5,out.width="10cm", results='hide', warning=FALSE, message=FALSE, cache=TRUE, echo=FALSE, dependson=c("downloadUSdata")}
+ matplot(USdata$age, log(Dxt / Ext)[,1:42], type = "l", 
+         lty = 1, col = 'grey', xlab = "age", ylab = "log death rates", 
+         main = "USA: male death rates (1975)", ylim = c(-10, 0))
+ lines(USdata$age, log(Dxt / Ext)[,43], lwd = 2)
+
+```
+$${\color{white}\log \mu_{xt} \quad =}\quad {\color{white}\alpha_x}  \quad{\color{white}+}\quad {\color{white}\sum_{i=1}^N} {\color{white} \beta_x^{{\color{white}(i)}}}{\color{white}\kappa_t}^{{\color{white}(i)}} \quad{\color{white}+}\quad {\color{white}\beta_x^{(0)}}{\color{white}\gamma_{t-x}}$$
+
+# Lee-Carter model
+
+\centering
+
+```{r plotEWAni1980, eval=TRUE,  fig.width=7, fig.height=4.5,out.width="10cm", results='hide', warning=FALSE, message=FALSE, cache=TRUE, echo=FALSE, dependson=c("downloadUSdata")}
+ matplot(USdata$age, log(Dxt / Ext)[,1:47], type = "l", 
+         lty = 1, col = 'grey', xlab = "age", ylab = "log death rates", 
+         main = "USA: male death rates (1980)", ylim = c(-10, 0))
+ lines(USdata$age, log(Dxt / Ext)[,48], lwd = 2)
+
+```
+$${\color{white}\log \mu_{xt} \quad =}\quad {\color{white}\alpha_x}  \quad{\color{white}+}\quad {\color{white}\sum_{i=1}^N} {\color{white} \beta_x^{{\color{white}(i)}}}{\color{white}\kappa_t}^{{\color{white}(i)}} \quad{\color{white}+}\quad {\color{white}\beta_x^{(0)}}{\color{white}\gamma_{t-x}}$$
+
+
+
+# Lee-Carter model
+
+\centering
+
+```{r plotEWAni1985, eval=TRUE,  fig.width=7, fig.height=4.5,out.width="10cm", results='hide', warning=FALSE, message=FALSE, cache=TRUE, echo=FALSE, dependson=c("downloadUSdata")}
+ matplot(USdata$age, log(Dxt / Ext)[,1:52], type = "l", 
+         lty = 1, col = 'grey', xlab = "age", ylab = "log death rates", 
+         main = "USA: male death rates (1985)", ylim = c(-10, 0))
+ lines(USdata$age, log(Dxt / Ext)[,53], lwd = 2)
+
+```
+$${\color{white}\log \mu_{xt} \quad =}\quad {\color{white}\alpha_x}  \quad{\color{white}+}\quad {\color{white}\sum_{i=1}^N} {\color{white} \beta_x^{{\color{white}(i)}}}{\color{white}\kappa_t}^{{\color{white}(i)}} \quad{\color{white}+}\quad {\color{white}\beta_x^{(0)}}{\color{white}\gamma_{t-x}}$$
+
+# Lee-Carter model
+
+\centering
+
+```{r plotEWAni1990, eval=TRUE,  fig.width=7, fig.height=4.5,out.width="10cm", results='hide', warning=FALSE, message=FALSE, cache=TRUE, echo=FALSE, dependson=c("downloadUSdata")}
+ matplot(USdata$age, log(Dxt / Ext)[,1:57], type = "l", 
+         lty = 1, col = 'grey', xlab = "age", ylab = "log death rates", 
+         main = "USA: male death rates (1990)", ylim = c(-10, 0))
+ lines(USdata$age, log(Dxt / Ext)[,58], lwd = 2)
+
+```
+$${\color{white}\log \mu_{xt} \quad =}\quad {\color{white}\alpha_x}  \quad{\color{white}+}\quad {\color{white}\sum_{i=1}^N} {\color{white} \beta_x^{{\color{white}(i)}}}{\color{white}\kappa_t}^{{\color{white}(i)}} \quad{\color{white}+}\quad {\color{white}\beta_x^{(0)}}{\color{white}\gamma_{t-x}}$$
+
+
+# Lee-Carter model
+
+\centering
+
+```{r plotEWAni1995, eval=TRUE,  fig.width=7, fig.height=4.5,out.width="10cm", results='hide', warning=FALSE, message=FALSE, cache=TRUE, echo=FALSE, dependson=c("downloadUSdata")}
+ matplot(USdata$age, log(Dxt / Ext)[,1:62], type = "l", 
+         lty = 1, col = 'grey', xlab = "age", ylab = "log death rates", 
+         main = "USA: male death rates (1995)", ylim = c(-10, 0))
+ lines(USdata$age, log(Dxt / Ext)[,63], lwd = 2)
+
+```
+$${\color{white}\log \mu_{xt} \quad =}\quad {\color{white}\alpha_x}  \quad{\color{white}+}\quad {\color{white}\sum_{i=1}^N} {\color{white} \beta_x^{{\color{white}(i)}}}{\color{white}\kappa_t}^{{\color{white}(i)}} \quad{\color{white}+}\quad {\color{white}\beta_x^{(0)}}{\color{white}\gamma_{t-x}}$$
+
+# Lee-Carter model
+
+\centering
+
+```{r plotEWAni2000, eval=TRUE,  fig.width=7, fig.height=4.5,out.width="10cm", results='hide', warning=FALSE, message=FALSE, cache=TRUE, echo=FALSE, dependson=c("downloadUSdata")}
+ matplot(USdata$age, log(Dxt / Ext)[,1:67], type = "l", 
+         lty = 1, col = 'grey', xlab = "age", ylab = "log death rates", 
+         main = "USA: male death rates (2000)", ylim = c(-10, 0))
+ lines(USdata$age, log(Dxt / Ext)[,68], lwd = 2)
+
+```
+$${\color{white}\log \mu_{xt} \quad =}\quad {\color{white}\alpha_x}  \quad{\color{white}+}\quad {\color{white}\sum_{i=1}^N} {\color{white} \beta_x^{{\color{white}(i)}}}{\color{white}\kappa_t}^{{\color{white}(i)}} \quad{\color{white}+}\quad {\color{white}\beta_x^{(0)}}{\color{white}\gamma_{t-x}}$$
+
+
+# Lee-Carter model
+
+\centering
+
+```{r plotEWAni2005, eval=TRUE,  fig.width=7, fig.height=4.5,out.width="10cm", results='hide', warning=FALSE, message=FALSE, cache=TRUE, echo=FALSE, dependson=c("downloadUSdata")}
+ matplot(USdata$age, log(Dxt / Ext)[,1:72], type = "l", 
+         lty = 1, col = 'grey', xlab = "age", ylab = "log death rates", 
+         main = "USA: male death rates (2005)", ylim = c(-10, 0))
+ lines(USdata$age, log(Dxt / Ext)[,73], lwd = 2)
+
+```
+$${\color{white}\log \mu_{xt} \quad =}\quad {\color{white}\alpha_x}  \quad{\color{white}+}\quad {\color{white}\sum_{i=1}^N} {\color{white} \beta_x^{{\color{white}(i)}}}{\color{white}\kappa_t}^{{\color{white}(i)}} \quad{\color{white}+}\quad {\color{white}\beta_x^{(0)}}{\color{white}\gamma_{t-x}}$$
+
+# Lee-Carter model
+
+\centering
+
+```{r plotEWAni2010, eval=TRUE,  fig.width=7, fig.height=4.5,out.width="10cm", results='hide', warning=FALSE, message=FALSE, cache=TRUE, echo=FALSE, dependson=c("downloadUSdata")}
+ matplot(USdata$age, log(Dxt / Ext)[,1:77], type = "l", 
+         lty = 1, col = 'grey', xlab = "age", ylab = "log death rates", 
+         main = "USA: male death rates (2010)", ylim = c(-10, 0))
+ lines(USdata$age, log(Dxt / Ext)[,78], lwd = 2)
+
+```
+$${\color{white}\log \mu_{xt} \quad =}\quad {\color{white}\alpha_x}  \quad{\color{white}+}\quad {\color{white}\sum_{i=1}^N} {\color{white} \beta_x^{{\color{white}(i)}}}{\color{white}\kappa_t}^{{\color{white}(i)}} \quad{\color{white}+}\quad {\color{white}\beta_x^{(0)}}{\color{white}\gamma_{t-x}}$$
+
+
+# Lee-Carter model
+
+\centering
+
+```{r plotEWAni2015, eval=TRUE,  fig.width=7, fig.height=4.5,out.width="10cm", results='hide', warning=FALSE, message=FALSE, cache=TRUE, echo=FALSE, dependson=c("downloadUSdata")}
+ matplot(USdata$age, log(Dxt / Ext)[,1:82], type = "l", 
+         lty = 1, col = 'grey', xlab = "age", ylab = "log death rates", 
+         main = "USA: male death rates (2015)", ylim = c(-10, 0))
+ lines(USdata$age, log(Dxt / Ext)[,83], lwd = 2)
+
+```
+$${\color{white}\log \mu_{xt} \quad =}\quad {\color{white}\alpha_x}  \quad{\color{white}+}\quad {\color{white}\sum_{i=1}^N} {\color{white} \beta_x^{{\color{white}(i)}}}{\color{white}\kappa_t}^{{\color{white}(i)}} \quad{\color{white}+}\quad {\color{white}\beta_x^{(0)}}{\color{white}\gamma_{t-x}}$$
+
+# Lee-Carter model
+
+\centering
+
+```{r plotEWAni2017, eval=TRUE,  fig.width=7, fig.height=4.5,out.width="10cm", results='hide', warning=FALSE, message=FALSE, cache=TRUE, echo=FALSE, dependson=c("downloadUSdata")}
+ matplot(USdata$age, log(Dxt / Ext)[,1:83], type = "l", 
+         lty = 1, col = 'grey', xlab = "age", ylab = "log death rates", 
+         main = "USA: male death rates (2017)", ylim = c(-10, 0))
+ lines(USdata$age, log(Dxt / Ext)[,84], lwd = 2)
+
+```
+$${\color{white}\log \mu_{xt} \quad =}\quad {\color{white}\alpha_x}  \quad{\color{white}+}\quad {\color{white}\sum_{i=1}^N} {\color{white} \beta_x^{{\color{white}(i)}}}{\color{white}\kappa_t}^{{\color{white}(i)}} \quad{\color{white}+}\quad {\color{white}\beta_x^{(0)}}{\color{white}\gamma_{t-x}}$$
+
+
+
+# Lee-Carter model
+
+\centering
+
+```{r plotAPC1, eval=TRUE,  fig.width=7, fig.height=4.5,out.width="10cm", results='hide', warning=FALSE, message=FALSE, cache=TRUE, echo=FALSE, dependson=c("downloadUSdata")}
+ matplot(USdata$age, log(Dxt / Ext), type = "l", 
+         lty = 1, col = 'grey', xlab = "age", ylab = "log death rates", 
+         main = "USA: male death rates (1933-2017)", ylim = c(-10, 0))
+
+```
+$${\color{black}\log \mu_{xt} \quad =}\quad {\color{white}\alpha_x}  \quad{\color{white}+}\quad {\color{white}\sum_{i=1}^N} {\color{white} \beta_x^{{\color{white}(i)}}}{\color{white}\kappa_t}^{{\color{white}(i)}} \quad{\color{white}+}\quad {\color{white}\beta_x^{(0)}}{\color{white}\gamma_{t-x}}$$
+
+
+# Lee-Carter model
+
+\centering
+
+```{r estimateAPC, results='hide', warning=FALSE, message=FALSE, cache=TRUE, echo=FALSE, dependson=c("downloadUSdata")}
+ APCfit <- fit(StMoMo(periodAgeFun = NULL), Dxt = Dxt, Ext = Ext, ages = USdata$age, years = years)
+```
+
+```{r plotAPC2, eval=TRUE,  fig.width=7, fig.height=4.5,out.width="10cm", results='hide', warning=FALSE, message=FALSE, cache=TRUE, echo=FALSE, dependson=c("downloadUSdata")}
+ matplot(USdata$age, log(Dxt / Ext), type = "l", 
+         lty = 1, col = 'grey', xlab = "age", ylab = "log death rates", 
+         main = "USA: male death rates (1933-2017)", ylim = c(-10, 0))
+ lines(APCfit$ages,APCfit$ax,col="black",lwd=2,lty=2)
+```
+$${\color{black}\log \mu_{xt} \quad =}\quad {\color{black}\alpha_x}  \quad{\color{white}+}\quad {\color{white}\sum_{i=1}^N} {\color{white} \beta_x^{{\color{white}(i)}}}{\color{white}\kappa_t}^{{\color{white}(i)}} \quad{\color{white}+}\quad {\color{white}\beta_x^{(0)}}{\color{white}\gamma_{t-x}}$$
+
+
+# Lee-Carter model
+
+\centering
+
+```{r plotAPC3, eval=TRUE,  fig.width=7, fig.height=4.5,out.width="10cm", results='hide', warning=FALSE, message=FALSE, cache=TRUE, echo=FALSE, dependson=c("downloadUSdata")}
+ matplot(USdata$age, log(Dxt / Ext), type = "l", 
+         lty = 1, col = 'grey', xlab = "age", ylab = "log death rates", 
+         main = "USA: male death rates (1933-2017)", ylim = c(-10, 0))
+  x <- seq(11,91,10)
+  y0 <- apply(log(Dxt / Ext) [x,],1,max)
+  y1 <- apply(log(Dxt / Ext) [x,],1,min)
+  arrows(x, y0, x, y1, length = 0.15, col ="black",lwd=2)
+```
+$${\color{black}\log \mu_{xt} \quad =}\quad {\color{black}\alpha_x}  \quad{\color{black}+}\quad {\color{white}\sum_{i=1}^N} {\color{white} \beta_x^{{\color{white}(i)}}}{\color{black}\kappa_t}^{{\color{white}(i)}} \quad{\color{white}+}\quad {\color{white}\beta_x^{(0)}}{\color{white}\gamma_{t-x}}$$
+
+
+# Lee-Carter model
+
+\centering
+
+```{r plotAPC4, eval=TRUE,  fig.width=7, fig.height=4.5,out.width="10cm", results='hide', warning=FALSE, message=FALSE, cache=TRUE, echo=FALSE, dependson=c("downloadUSdata")}
+ matplot(USdata$age, log(Dxt / Ext), type = "l", 
+         lty = 1, col = 'grey', xlab = "age", ylab = "log death rates", 
+         main = "USA: male death rates (1933-2017)", ylim = c(-10, 0))
+  x <- seq(11,91,10)
+  y0 <- apply(log(Dxt / Ext) [x,],1,max)
+  y1 <- apply(log(Dxt / Ext) [x,],1,min)
+  arrows(x, y0, x, y1, length = 0.15, col ="darkgrey",lwd=2)
+  
+  x <- c(11,61)
+  y0 <- apply(log(Dxt / Ext) [x,],1,max)
+  y1 <- apply(log(Dxt / Ext) [x,],1,min)
+  arrows(x, y0, x, y1, length = 0.15, col ="black",lwd=2)
+  
+  
+```
+$${\color{black}\log \mu_{xt} \quad =}\quad {\color{black}\alpha_x}  \quad{\color{black}+}\quad {\color{white}\sum_{i=1}^N} {\color{black} \beta_x^{{\color{white}(i)}}}{\color{black}\kappa_t}^{{\color{white}(i)}} \quad{\color{white}+}\quad {\color{white}\beta_x^{(0)}}{\color{white}\gamma_{t-x}}$$
+
+
+
+# Lee-Carter model 
+
+\centering
+
+
+```{r plotLC, eval=TRUE,  fig.width=8*0.85, fig.height=6*0.85,out.width="10.5cm", results='hide', warning=FALSE, message=FALSE, cache=TRUE, echo=FALSE, dependson=c("downloadUSdata")}
+USmale <- StMoMoData(USdata, series = "male")
+ages.fit <- 0:100
+years.fit <- 1968:2017
+
+#Fit all models         
+LCfit <- fit(lc(), data = USmale, ages.fit = ages.fit,  
+             years.fit = years.fit) 
+plot(LCfit)  
+```
+
+
+#Cairns-Blake-Dowd model 
+
+\begin{columns}
+\begin{column}{0.4\textwidth}
+\[\logit q_{xt} = \kappa_t^{(1)} + (x-\bar{x})\kappa_t^{(2)} \]
+\end{column}
+\begin{column}{0.5\textwidth}
+ 
+ 
+\includegraphics[width=4.5cm]{FigureCBD/unnamed-chunk-2-1} 
+
+ 
+\end{column}
+\end{columns}
+
+
+
+ 
+ 
+\centering \includegraphics[width=9cm]{FigureCBD/unnamed-chunk-3-1} 
+
+ 
+
+
+
+
+#Cairns-Blake-Dowd model 
+\begin{columns}
+\begin{column}{0.4\textwidth}
+\[\logit q_{xt} = \kappa_t^{(1)} + (x-\bar{x})\kappa_t^{(2)} \]
+\end{column}
+\begin{column}{0.5\textwidth}
+ 
+ 
+\includegraphics[width=4.5cm]{FigureCBD/unnamed-chunk-4-1} 
+
+ 
+\end{column}
+\end{columns}
+
+ 
+ 
+\centering \includegraphics[width=9cm]{FigureCBD/unnamed-chunk-5-1} 
+
+ 
+
+
+
+
+#Cairns-Blake-Dowd model 
+\begin{columns}
+\begin{column}{0.4\textwidth}
+\[\logit q_{xt} = \kappa_t^{(1)} + (x-\bar{x})\kappa_t^{(2)} \]
+\end{column}
+\begin{column}{0.5\textwidth}
+ 
+ 
+\includegraphics[width=4.5cm]{FigureCBD/unnamed-chunk-6-1} 
+
+ 
+\end{column}
+\end{columns}
+
+ 
+ 
+\centering \includegraphics[width=9cm]{FigureCBD/unnamed-chunk-7-1} 
+
+ 
+
+
+
+
+#Cairns-Blake-Dowd model 
+\begin{columns}
+\begin{column}{0.4\textwidth}
+\[\logit q_{xt} = \kappa_t^{(1)} + (x-\bar{x})\kappa_t^{(2)} \]
+\end{column}
+\begin{column}{0.5\textwidth}
+ 
+ 
+\includegraphics[width=4.5cm]{FigureCBD/unnamed-chunk-8-1} 
+
+ 
+\end{column}
+\end{columns}
+
+ 
+ 
+\centering \includegraphics[width=9cm]{FigureCBD/unnamed-chunk-9-1} 
+
+
+
+
+
+
+#Cairns-Blake-Dowd model 
+\begin{columns}
+\begin{column}{0.4\textwidth}
+\[\logit q_{xt} = \kappa_t^{(1)} + (x-\bar{x})\kappa_t^{(2)} \]
+\end{column}
+\begin{column}{0.5\textwidth}
+ 
+ 
+\includegraphics[width=4.5cm]{FigureCBD/unnamed-chunk-10-1} 
+
+ 
+\end{column}
+\end{columns}
+
+ 
+ 
+\centering \includegraphics[width=9cm]{FigureCBD/unnamed-chunk-11-1} 
+
+ 
+
+
+
+#Cairns-Blake-Dowd model 
+\begin{columns}
+\begin{column}{0.4\textwidth}
+\[\logit q_{xt} = \kappa_t^{(1)} + (x-\bar{x})\kappa_t^{(2)} \]
+\end{column}
+\begin{column}{0.5\textwidth}
+ 
+ 
+\includegraphics[width=4.5cm]{FigureCBD/unnamed-chunk-12-1} 
+
+ 
+\end{column}
+\end{columns}
+
+ 
+ 
+\centering \includegraphics[width=9cm]{FigureCBD/unnamed-chunk-13-1} 
+
+ 
+
+
+
+#Cairns-Blake-Dowd model 
+\begin{columns}
+\begin{column}{0.4\textwidth}
+\[\logit q_{xt} = \kappa_t^{(1)} + (x-\bar{x})\kappa_t^{(2)} \]
+\end{column}
+\begin{column}{0.5\textwidth}
+ 
+ 
+\includegraphics[width=4.5cm]{FigureCBD/unnamed-chunk-14-1} 
+
+ 
+\end{column}
+\end{columns}
+
+ 
+ 
+\centering \includegraphics[width=9cm]{FigureCBD/unnamed-chunk-15-1} 
+
+ 
+
+
+
+#Cairns-Blake-Dowd model 
+\begin{columns}
+\begin{column}{0.4\textwidth}
+\[\logit q_{xt} = \kappa_t^{(1)} + (x-\bar{x})\kappa_t^{(2)} \]
+\end{column}
+\begin{column}{0.5\textwidth}
+ 
+ 
+\includegraphics[width=4.5cm]{FigureCBD/unnamed-chunk-16-1} 
+
+ 
+\end{column}
+\end{columns}
+
+ 
+ 
+\centering \includegraphics[width=9cm]{FigureCBD/unnamed-chunk-17-1} 
+
+ 
+
+
+
+
+#Cairns-Blake-Dowd model 
+\begin{columns}
+\begin{column}{0.4\textwidth}
+\[\logit q_{xt} = \kappa_t^{(1)} + (x-\bar{x})\kappa_t^{(2)} \]
+\end{column}
+\begin{column}{0.5\textwidth}
+ 
+ 
+\includegraphics[width=4.5cm]{FigureCBD/unnamed-chunk-18-1} 
+
+ 
+\end{column}
+\end{columns}
+
+ 
+ 
+\centering \includegraphics[width=9cm]{FigureCBD/unnamed-chunk-19-1} 
+
+ 
+
+
+
+
+
+#Cairns-Blake-Dowd model 
+\begin{columns}
+\begin{column}{0.4\textwidth}
+\[\logit q_{xt} = \kappa_t^{(1)} + (x-\bar{x})\kappa_t^{(2)} \]
+\end{column}
+\begin{column}{0.5\textwidth}
+ 
+ 
+\includegraphics[width=4.5cm]{FigureCBD/unnamed-chunk-20-1} 
+
+ 
+\end{column}
+\end{columns}
+
+ 
+ 
+\centering \includegraphics[width=9cm]{FigureCBD/unnamed-chunk-21-1} 
+
+
+# Other Stochastic Mortality Models
+
+```{r tab1, echo=FALSE, message=FALSE,warning=FALSE, cache=TRUE, autodep=TRUE}
+library(kableExtra)
+table <- data.frame("Name" = c("LC", "LC2", "RH", "APC", "CBD", "M7", "sPLAT", "cPLAT"), "Form" = c('$\\alpha_x + \\beta_x^{(1)} \\kappa_t^{(1)}$', '$\\alpha_x + \\beta_x^{(1)} \\kappa_t^{(1)} + \\beta_x^{(2)} \\kappa_t^{(2)}$', '$\\alpha_x + \\beta_x^{(1)} \\kappa_t^{(1)} + \\beta_x^{(0)}\\gamma_{c}$', '$\\alpha_x + \\kappa_t^{(1)} + \\gamma_{c}$', '$\\kappa_t^{(1)} + (x-\\bar{x}) \\kappa_t^{(2)}$', '$\\kappa_t^{(1)} + (x-\\bar{x})\\kappa_t^{(2)} + ((x-\\bar{x})^2 - \\sigma_x^2) \\kappa_t^{(3)} + \\gamma_{c}$', '$\\alpha_x + \\kappa_t^{(1)} + (\\bar{x}-x) \\kappa_t^{(2)} + \\gamma_{c}$', '$\\alpha_x + \\kappa_t^{(1)} + (\\bar{x}-x) \\kappa_t^{(2)} + (\\bar{x}-x)^+ \\kappa_t^{(3)} + \\gamma_{c}$'), "Parameters" = c('$2n_a + n_y$', '$3n_a + 2n_y$', '$3n_a + n_y + n_c$', '$n_a + n_y + n_c$', '$2n_y$', '$3n_y + n_c$', '$n_a + 2n_y + n_c$', '$n_a + 3n_y + n_c$'))
+kable(table, "latex", align=c("c","l","l"), booktabs=TRUE, escape = F, linesep = "") %>%
+kable_styling(latex_options = c("hold_position")) %>%
+row_spec(0, align = "c")
+
+```
+
+#Generalised Age-Period-Cohort stochastic mortality models
+
+Recent research has proposed a unifying framework discrete stochastic mortality models
+
+-  General Age-Period-Cohort model structure [@Hunt2015b]
+-  Generalised (non-)linear model [@Currie2014]
+- R Implementation of GAPC models [@Villegas2018a]
+
+#Generalised Age-Period-Cohort stochastic mortality models
+\begin{enumerate}
+  \item \red{Random Component:}
+\[D_{xt}\sim \text{Poisson}(E^c_{xt}\mu_{xt}) \quad \text{or} \quad D_{xt}\sim \text{Binomial}(E_{xt}, q_{xt})\]
+  
+  \item \red{Systematic Component:}
+  \[ \eta_{xt} \quad=\quad \alpha_x \quad+\quad {\sum_{i=1}^N \beta_x^{(i)}\kappa_t^{(i)} \quad+\quad \beta_x^{(0)}\gamma_{t-x}}\]
+  \bi
+    \item Lee-Carter type \ra $\beta_x^{(i)}$, non-parametric 
+    \item CBD type \ra $\beta_x^{(i)}\equiv f^{(i)}(x)$, pre-specified parametric function 
+  \ei
+  
+  \item \red{Link Function: }
+    \[g\left(\mathbb{E}\left(\frac{D_{xt}}{E_{xt}}\right)\right) = \eta_{xt}\]
+    \bi
+      \item log-Poisson: $\eta_{xt} = \log \mu_{xt}$
+      \item logit-Binomial: $\eta_{xt} = \logit q_{xt}$
+    \ei
+\end{enumerate}
+
+
+
+#Generalised Age-Period-Cohort stochastic mortality models
+\begin{enumerate}
+\setcounter{enumi}{3}
+  \item \red{Set of parameter constraints:}
+  \bi
+
+    \item Need parameters constraints to ensure identifiability
+\ei
+
+\item \red{Forecasting and simulation}
+\bi
+\item {Period indexes}: Multivariate random walk with drift
+\begin{equation*}
+\boldsymbol{\kappa}_t = \boldsymbol{\delta} + \boldsymbol{\kappa}_{t-1} + \boldsymbol{\xi}_t^\kappa, \qquad \boldsymbol{\kappa}_t = 
+\left(\!
+    \begin{array}{c}
+      \kappa_t^{(1)} \\
+      \vdots\\
+  		\kappa_t^{(N)}
+    \end{array}
+  \!\right), \qquad \boldsymbol{\xi}_t^\kappa\sim N(\mathbf{0},\Sigma),
+\end{equation*}
+
+\item {Cohort effect}: ARIMA$(p,q,d)$ with drift 
+\begin{equation*}
+\Delta^d\gamma_c =  \delta_0 + \phi_1\Delta^d\gamma_{c-1} +\cdots+ \phi_p\Delta^d\gamma_{c-p}+\epsilon_{c}+\delta_1\epsilon_{c-1}+\cdots+\delta_q\epsilon_{c-q}
+\end{equation*}
+\ei
+\end{enumerate}
+
+<!-- \fbox{ -->
+<!-- \resizebox{\textwidth}{!}{ -->
+<!-- \begin{minipage}{1\textwidth} -->
+<!-- GAPC models can be implemented with the R package StMoMo  (\url{http://cran.r-project.org/package=StMoMo})  -->
+<!-- \end{minipage}}} -->
+
+
+----
+
+\vspace{3cm}
+\begin{center}
+\text{{\Huge\color{CEPAR}Mortality Modelling with \texttt{R}}}
+\end{center}
+\vspace{3cm}
+
+
+# Mortality modelling in R
+
+* **Demography** [@Hyndman2014] 
+    * Download data from the Human Mortality Database
+    * Lee-Carter model and several of its variants
+* **ilc** [@Butt2014]
+    * Lee-Carter with cohorts and Lee-Carter under a Poisson framework
+* **Lifemetrics** (http://www.macs.hw.ac.uk/~andrewc/lifemetrics/ )
+    * CBD and extensions
+    * Lee-Carter with cohorts and Lee-Carter under a Poisson framework
+
+* **StMoMo** [@Villegas2018a]
+    * Implements Generalised Age-Period-Cohort Models
+
+
+# Installation of `R` Packages
+
+* To install the pacakges we use:
+```{r, eval=FALSE}
+install.packages("demography")
+install.packages("StMoMo")
+install.packages("lifecontingencies")
+```
+
+* To load within `R`:
+```{r, eval=TRUE,echo = TRUE, message=FALSE, warning=FALSE}
+library(demography)
+library(StMoMo)
+library(lifecontingencies)
+```
+
+# Downloading Data from the [Human Mortality Database](http://www.mortality.org/)
+
+- Human Mortality Database (http://www.mortality.org/) contains population mortality data for 39 countries under consistent data protocol and in consistent format
+    - Very useful for cross-country comparisons
+    - Need to register to obtain username and password
+- Subregional versions available for:
+    - USA (https://usa.mortality.org/)
+    - Japan (http://www.ipss.go.jp/p-toukei/JMD/index-en.asp)
+    - Australia (http://demography.cass.anu.edu.au/research/australian-human-mortality-database) 
+    - Canada (http://www.bdlc.umontreal.ca/CHMD/)
+- For this example, we will use male USA data from 1950 to 2014
+
+
+# Australian Data from [Human Mortality Database](http://www.mortality.org/)
+
+```{r defineUSdata, echo=FALSE, eval=TRUE, cache=TRUE, results='hide'}
+Ext <- USdata$pop$male 
+Dxt <- USdata$rate$male * Ext
+ages <- USdata$age     #0-110
+years <- USdata$year   #1921-2011
+```
+
+
+```{r, eval=FALSE}
+library(demography) 
+USdata <- hmd.mx(country = "USA", username = "username",
+                  password = "password")
+```
+
+```{r showDemogData, eval=TRUE, echo = TRUE, cache=TRUE, dependson = "defineUSdata"}
+USdata
+```
+
+
+$$\text{{\color{white} x}}$$
+$$\text{{\color{white} x}}$$
+$$\text{{\color{white} x}}$$
+$$\text{{\color{white} x}}$$
+$$\text{{\color{white} x}}$$
+
+
+
+# USA Data from [Human Mortality Database](http://www.mortality.org/)
+
+```{r, eval=FALSE}
+library(demography) 
+USdata <- hmd.mx(country = "USA", username = "username",
+                  password = "password")
+```
+\centering
+
+\vspace{-0.5cm}
+
+```{r plotDemogData, eval=TRUE,  fig.width=7, fig.height=4.15,out.width="9cm", results='hide', warning=FALSE, message=FALSE, cache=TRUE, echo=TRUE, dependson=c("downloadUSdata")}
+plot(USdata, series = "male")
+```
+
+# USA Data from [Human Mortality Database](http://www.mortality.org/)
+
+```{r, eval=FALSE}
+library(demography) 
+USdata <- hmd.mx(country = "USA", username = "username",
+                  password = "password")
+```
+\centering
+
+\vspace{-0.5cm}
+
+```{r plotDemogDataTime, eval=TRUE,  fig.width=7, fig.height=4.15,out.width="9cm", results='hide', warning=FALSE, message=FALSE, cache=TRUE, echo=TRUE, dependson=c("downloadUSdata")}
+plot(USdata, series = "male", plot.type = "time")
+```
+
+# **StMoMo**: **St**ochastic **Mo**rtality **Mo**delling
+\centering
+Who is MoMo?
+
+\pause
+
+\includegraphics[width = 11cm]{FiguresPreliminaries/momo}
+
+$$\text{{\color{white} x}}$$
+
+# **StMoMo**: **St**ochastic **Mo**rtality **Mo**delling
+Who is MoMo?
+\centering
+
+\includegraphics[width = 11cm]{FiguresPreliminaries/Carnaval.jpg}
+
+$$\text{{\color{white} x}}$$
+
+# **StMoMo**: **St**ochastic **Mo**rtality **Mo**delling
+\centering
+Who is MoMo?
+
+\includegraphics[width = 11cm]{FiguresPreliminaries/joselito.jpg}
+
+# Overview of the structure of **StMoMo**
+
+\centering
+
+\includegraphics[width=12cm]{FiguresPreliminaries/StMoMoDiagram.png}
+
+# GAPC stochastic mortality models with **StMoMo** 
+
+Model         | Predictor ($\eta_{xt}$)
+------------- | ----------------------------------------------------------
+LC            | $\alpha_x + \beta^{(1)}_x \kappa^{(1)}_t$
+APC           | $\alpha_x + \kappa^{(1)}_t+ \gamma_{t-x}$
+CBD           | $\kappa_t^{(1)} + (x-\bar{x})\kappa_t^{(2)}$
+M7            | $\kappa_t^{(1)} + (x-\bar{x})\kappa_t^{(2)} + \left((x-\bar{x})^2-\hat{\sigma}_x^2\right)\kappa_t^{(3)} + \gamma_{t-x}$
+
+
+* For consistency, all under a log-Poisson setting: 
+$$D_{xt}\sim \mathrm{Poisson}(E^c_{xt}\mu_{xt})$$
+$$\log \mu_{xt}=\eta_{xt}$$
+
+# Model definition: Predefined functions for common models
+
+. . .
+
+```{r defineAll, eval=TRUE, cache=TRUE}
+LC <- lc()
+CBD <- cbd(link = "log")
+APC <- apc()
+M7 <- m7(link = "log")
+```  
+
+. . .
+
+```{r showDefiniction, eval=TRUE, echo=FALSE, linewidth = 70}
+LC 
+CBD
+APC
+```  
+
+```{r showDefiniction2, eval=TRUE, echo=FALSE, linewidth = 66}
+M7 
+```  
+
+# Model fitting: Lee-Carter Example
+\centering
+```{r plotLCall, eval=TRUE,  fig.width=8, fig.height=5, out.width="9.5cm", results='hide', warning=FALSE, message=FALSE, cache=TRUE, echo=TRUE, dependson="defineAUSdata"}
+USmale <- StMoMoData(USdata, series = "male")
+LCfit <- fit(LC, data = USmale)
+plot(LCfit)
+```
+
+
+
+
+# Model fitting: Concentrate on older ages
+```{r fit1, eval=TRUE, cache=TRUE, results='hide', dependson=c("defineAll", "defineAUSdata"), warning=FALSE}
+#Ages for fitting
+ages.fit <- 60:89
+years.fit <- 1968:2017
+
+#Fit all models         
+LCfit <- fit(LC, data=USmale, ages.fit=ages.fit,  
+             years.fit=years.fit)
+CBDfit <- fit(CBD, data=USmale, ages.fit=ages.fit,  
+              years.fit=years.fit)
+APCfit <- fit(APC, data=USmale, ages.fit=ages.fit,  
+              years.fit=years.fit)
+M7fit <- fit(M7, data=USmale, ages.fit=ages.fit,  
+               years.fit=years.fit)
+```
+
+
+# Parameter estimates -- LC ($\log \mu_{xt} = \alpha_x + \beta^{(1)}_x \kappa^{(1)}_t$)
+```{r plotLC2, eval=TRUE,  fig.width=8, fig.height=5.5, out.width="10cm", fig.align='center', results='hide', warning=FALSE, message=FALSE, cache=TRUE, echo=TRUE, dependson= c("defineAUSdata", "fit1")}
+ plot(LCfit)
+```
+
+
+# Parameter estimates -- APC ($\log \mu_{xt} = \alpha_x + \kappa^{(1)}_t + \gamma_{t-x}$)
+```{r plotAPC, eval=TRUE,  fig.width=8, fig.height=5.5, out.width="10cm", fig.align='center',  results='hide', warning=FALSE, message=FALSE, cache=TRUE, echo=TRUE, dependson= c("defineAUSdata", "fit1")}
+ plot(APCfit, parametricbx = FALSE)
+```
+
+
+# Parameter estimates -- CBD ($\log \mu_{xt} = \kappa_t^{(1)} + (x-\bar{x})\kappa_t^{(2)}$)
+```{r plotCBD, eval=TRUE,  fig.width=8, fig.height=4, out.width="10cm", fig.align='center', results='hide', warning=FALSE, message=FALSE, cache=TRUE, echo=TRUE, dependson= c("defineAUSdata", "fit1")}
+ plot(CBDfit, parametricbx = FALSE)
+```
+
+# Goodness-of-fit: Deviance Residuals
+
+
+\begin{equation*}\label{eq:Residuals}
+r_{xt}=\mathrm{sign}(d_{xt}-\hat{d}_{xt})\sqrt{\frac{\mathrm{dev}(x,t)}{\hat{\phi}}}
+\end{equation*}
+
+. . .
+
+
+```{r resAll, eval=TRUE, echo=TRUE, cache=TRUE, dependson=c("fit1")}
+#Compute residuals
+LCres <- residuals(LCfit)
+APCres <- residuals(APCfit)
+CBDres <- residuals(CBDfit)
+M7res <- residuals(M7fit)
+```
+
+# Goodness-of-fit: Residual heatmaps
+
+```{r plotLCresShow, eval=FALSE}
+plot(LCres, type = "colourmap", reslim = c(-3.5, 3.5))
+``` 
+
+\centering
+
+```{r plotResHeatmaps1, fig.width=4, fig.height=3,out.width="4.5cm", echo=FALSE, cache=TRUE, dependson="resAll"}
+par(mar=c(4.5,4,1,1))
+plot(LCres, type = "colourmap", reslim = c(-3.5,3.5))
+title("LC             ")
+plot(APCres, type = "colourmap", reslim = c(-3.5,3.5))
+title("APC            ")
+``` 
+
+```{r plotResHeatmaps2, fig.width=4, fig.height=3,out.width="4.5cm", echo=FALSE, cache=TRUE, dependson="resAll"}
+par(mar=c(4.5,4,1,1))
+plot(CBDres, type = "colourmap", reslim = c(-3.5,3.5))
+title("CBD            ")
+plot(M7res, type = "colourmap", reslim = c(-3.5,3.5))
+title("M7             ")
+``` 
+
+
+# Goodness-of-fit: Residual scatterplots
+
+```{r plotLCresScatter, eval=FALSE}
+plot(CBDres, type = "scatter", reslim = c(-3.5, 3.5))
+``` 
+
+\centering
+
+\vspace{-0.5cm}
+
+```{r plotResScatter1, fig.width=10, fig.height=3,out.width="12cm", echo=FALSE, cache=TRUE, dependson="resAll"}
+plot(CBDres, type = "scatter", reslim = c(-3.5,3.5))
+title("CBD             ")
+``` 
+
+
+```{r plotResScatter2, fig.width=10, fig.height=3,out.width="12cm", echo=FALSE, cache=TRUE, dependson="resAll"}
+plot(M7res, type = "scatter", reslim = c(-3.5,3.5))
+title("M7              ")
+
+``` 
+
+# Goodness-of-fit vs Parsimony: AIC and BIC
+
+\vspace{-0.5cm}
+
+$$AIC = -2{\cal L} + 2 \times \nu \qquad BIC = -2{\cal L} +  \log K \times \nu $$
+
+\vspace{-0.5cm}
+
+. . .
+
+```{r AIC, eval=TRUE, echo=TRUE, cache=TRUE, dependson=c("fit1")}
+#Compute residuals
+AIC(CBDfit)
+BIC(CBDfit)
+```
+
+\vspace{-0.5cm}
+
+```{r roundAIC, eval=TRUE, echo=FALSE, cache=FALSE, dependson=c("fit1")}
+#Compute residuals
+IC <- function(x) sprintf("%.0f", AIC(x)[1])
+IC2 <- function(x) sprintf("%.0f", BIC(x)[1])
+```
+
+. . .
+
+    
+Criterion              |  LC              |  APC            |  CBD            | M7                  
+---------------------- | ---------------- |---------------- |-----------------|--------------------- 
+*AIC*                  | `r IC(LCfit )`   | `r IC(APCfit)`  | `r IC(CBDfit)`  | **`r IC(M7fit )`** 
+*BIC*                  | `r IC2(LCfit )`  | `r IC2(APCfit)` | `r IC2(CBDfit)` | **`r IC2(M7fit )`**   
+
+# Forecasting and simulation
+
+* **Period indexes:** Multivariate random walk with drift
+\begin{equation*}
+\boldsymbol{\kappa}_t = \boldsymbol{\delta} + \boldsymbol{\kappa}_{t-1} + \boldsymbol{\xi}_t^\kappa, \qquad \boldsymbol{\kappa}_t = 
+\left(\!
+    \begin{array}{c}
+      \kappa_t^{(1)} \\
+      \vdots\\
+  		\kappa_t^{(N)}
+    \end{array}
+  \!\right), \qquad \boldsymbol{\xi}_t^\kappa\sim N(\mathbf{0},\Sigma),
+\end{equation*}
+
+* **Cohort effect:** ARIMA$(p,q,d)$ with drift 
+\begin{equation*}
+\Delta^d\gamma_c =  \delta_0 + \phi_1\Delta^d\gamma_{c-1} +\cdots+ \phi_p\Delta^d\gamma_{c-p}+\epsilon_{c}+\delta_1\epsilon_{c-1}+\cdots+\delta_q\epsilon_{c-q}
+\end{equation*}
+
+# Forecasting
+
+
+Model         | Model for $\gamma_{t-x}$
+------------- | -------------
+APC           | ARIMA$(1,1,0)$ with zero mean
+M7            | ARIMA$(0,0,0)$ with zero mean
+
+. . .
+
+30-year ahead ($h=30$) central projections: period indexes, cohort index, and death rates probabilities:
+
+```{r forAll, cache=TRUE, dependson=c("fit1")}
+LCfor <- forecast(LCfit, h=30)
+APCfor <- forecast(APCfit, h=30, gc.order = c(1,1,0), 
+                   gc.include.constant = FALSE)
+CBDfor <- forecast(CBDfit, h=30)
+M7for <- forecast(M7fit, h=30, gc.order = c(0,0,0), 
+                  gc.include.constant = FALSE)
+``` 
+
+# Forecasted period and cohort indexes
+\centering
+```{r plotForecastM7, eval=TRUE,  fig.width=8*1.0, fig.height=7*0.8, out.width="10cm", results='hide', warning=FALSE, message=FALSE, cache=TRUE, echo=TRUE, dependson="forAll"}
+plot(M7for, parametricbx = FALSE)
+``` 
+
+# Forecasted period and cohort indexes
+\centering
+```{r plotForecastAPC, eval=TRUE,  fig.width=8*1.0, fig.height=7*0.8, out.width="10cm", results='hide', warning=FALSE, message=FALSE, cache=TRUE, echo=TRUE, dependson="forAll"}
+plot(APCfor, parametricbx = FALSE)
+``` 
+
+
+# Simulation
+
+```{r simAll, cache=TRUE, dependson=c("fit1")}
+LCsim <- simulate(LCfit, nsim=1000, h=30)
+APCsim <- simulate(APCfit, nsim=1000, h=30, 
+                   gc.order = c(1,1,0), 
+                   gc.include.constant = FALSE)
+CBDsim <- simulate(CBDfit, nsim=1000, h=30)
+M7sim <- simulate(M7fit, nsim=1000, h=30, 
+                  gc.order = c(0,0,0),
+                  gc.include.constant = FALSE)
+```
+
+
+# Simulation 
+
+
+```{r plotSimLC, fig.width=6, fig.height=4,out.width="6.5cm", echo=TRUE, cache=TRUE,fig.align='center', dependson="simAll"}
+#Plot period index trajectories for the LC model
+plot(LCfit$years, LCfit$kt[1,], type="l", xlim=c(1968,2047),
+     ylim=c(-40,12), xlab="year", ylab="kt",
+     main="Period index (LC)")
+matlines(LCsim$kt.s$years, LCsim$kt.s$sim[1,,1:20], type="l", 
+         lty=1)
+```
+
+
+# Fancharts
+
+
+```{r plotLCFanShow, fig.width=6, fig.height=4,out.width="6.5cm", echo=TRUE, cache=TRUE,fig.align='center', dependson="simAll"}
+library(fanplot)
+mxt <- LCfit$Dxt/LCfit$Ext
+plot(LCfit$years, mxt["65",], pch=20, xlim=c(1968,2047), 
+     ylim=c(0.0045,0.04), log="y", xlab="year", ylab="m(65,t)")
+fan(t(LCsim$rates["65",,]), start=2017, probs=c(50,75,90,97.5), 
+  n.fan=4, ln=NULL, fan.col=colorRampPalette(c("black","white")))
+```
+
+
+# Fancharts
+```{r fanchartFun, echo=FALSE, cache=TRUE}
+
+rateFanChartFun<- function(GAPCfit, GAPCsim){
+  probs = c(2.5, 10, 25, 50, 75, 90, 97.5)
+  mxt <- LCfit$Dxt/LCfit$Ext
+  #age 65
+  plot(GAPCfit$years, mxt["65", ], xlim = c(1968, 2047), ylim = c(0.005, 0.2),
+  xlab = "year", ylab = "mortality rate (log scale)",
+  pch = 20, log = "y")
+  fan(t(GAPCsim$rates["65", , ]), start = 2017, probs = probs, n.fan = 4,
+  fan.col = colorRampPalette(c(rgb(80/255,81/255,84/255), "white")), ln = NULL)
+  #age 75
+  points(GAPCfit$years, mxt["75", ], pch = 20)
+  fan(t(GAPCsim$rates["75", , ]), start = 2017, probs = probs, n.fan = 4,
+  fan.col = colorRampPalette(c(rgb(0,170/255,176/255), "white")), ln = NULL)
+  #age 75
+  points(GAPCfit$years, mxt["85", ], pch = 20)
+  fan(t(GAPCsim$rates["85", , ]), start = 2017, probs = probs, n.fan = 4,
+  fan.col = colorRampPalette(c(rgb(192/255,8/255,31/255), "white")), ln = NULL)
+  #labels
+  text(1975, mxt[c("65", "75", "85"), "1995"],
+  labels = c("x = 65", "x = 75", "x = 85"))
+}
+```
+
+\centering
+
+\vspace{-0.5cm}
+
+```{r plotLC_APCfan, fig.width=3.8*0.9, fig.height=5*0.9,out.width="3.4cm", echo=FALSE, cache=TRUE, dependson=c("simAll", "fanchartFun")}
+rateFanChartFun(LCfit, LCsim)
+title("LC")
+rateFanChartFun(APCfit, APCsim)
+title("APC")
+rateFanChartFun(CBDfit, CBDsim)
+title("CBD")
+rateFanChartFun(M7fit, M7sim)
+title("M7")
+```
+
+
+# Obtaining projected life tables for a cohort
+
+```{r LCcohort, echo=TRUE, cache=TRUE, dependson=c("forAll")}
+chosen_cohort <- 1950
+
+#observed rates for ages 0-59
+hist_rates <- extractCohort(USmale$Dxt/USmale$Ext, 
+                               cohort = chosen_cohort)[1:60]
+
+#fitted historical rates for ages 60-67
+lc_fit_rates <- extractCohort(fitted(LCfit, type = "rates"),
+                               cohort = chosen_cohort)
+#forcasted rates for ages 68-89
+lc_for_rates <- extractCohort(LCfor$rates, 
+                              cohort = chosen_cohort)
+#all rates
+lc_rates_1950 <- c(hist_rates,lc_fit_rates, lc_for_rates)
+```
+
+
+
+# Obtaining projected life tables for a cohort
+
+```{r plotLCcohort, fig.width=5*0.9, fig.height=4*0.9,out.width="6.5cm", fig.align='center', echo=TRUE, cache=TRUE, dependson=c("LCcohort")}
+plot(0:89, lc_rates_1950 ,type = "l", log = "y", xlab = "age",
+     ylab = "m(x)", main = "Cohort 1950 mortality rate")
+lines(68:89, lc_for_rates, col = "red")
+```
+
+# Computing life expectancies using **lifecontingencies**
+
+
+```{r LE, echo=TRUE, cache=TRUE, dependson=c("LCcohort")}
+#Transform mx to qx
+lc_qx_1950 <- mx2qx(lc_rates_1950)
+#Create lifetable
+lc_lifetable_1950 <- probs2lifetable(probs = lc_qx_1950, 
+                                     type = "qx",
+                                     name = "LC-1950")
+exn(lc_lifetable_1950,x=65)
+```
+
+```{r LEcohort, echo=FALSE, cache=TRUE, dependson=c("forAll", "LCcohort")}
+cbd_rates_1950 <- c(hist_rates,
+                   extractCohort(fitted(CBDfit, type = "rates"),
+                               cohort = chosen_cohort),
+                   extractCohort(CBDfor$rates, 
+                              cohort = chosen_cohort))
+apc_rates_1950 <- c(hist_rates,
+                   extractCohort(fitted(APCfit, type = "rates"),
+                               cohort = chosen_cohort),
+                   extractCohort(APCfor$rates, 
+                              cohort = chosen_cohort))
+m7_rates_1950 <- c(hist_rates,
+                   extractCohort(fitted(M7fit, type = "rates"),
+                               cohort = chosen_cohort),
+                   extractCohort(M7for$rates, 
+                              cohort = chosen_cohort))
+cbd_qx_1950 <- mx2qx(cbd_rates_1950)
+cbd_lifetable_1950 <- probs2lifetable(probs = cbd_qx_1950, type = "qx")
+apc_qx_1950 <- mx2qx(apc_rates_1950)
+apc_lifetable_1950 <- probs2lifetable(probs = apc_qx_1950, type = "qx")
+m7_qx_1950 <- mx2qx(m7_rates_1950)
+m7_lifetable_1950 <- probs2lifetable(probs = m7_qx_1950, type = "qx")
+```
+
+. . . 
+
+
+Model                  |  LC                              |  APC                              |  CBD                              | M7                  
+---------------------- | -------------------------------- |---------------------------------- |----------------------------------- |---------------------------------- 
+LE at age 65           | `r exn(lc_lifetable_1950,x=65)`  | `r exn(apc_lifetable_1950,x=65)`  | `r exn(cbd_lifetable_1950,x=65)`  | `r exn(m7_lifetable_1950,x=65)` 
+LE at age 75           | `r exn(lc_lifetable_1950,x=75)`  | `r exn(apc_lifetable_1950,x=75)`  | `r exn(cbd_lifetable_1950,x=75)`  | `r exn(m7_lifetable_1950,x=75)`
+
+# Summary
+
+- This has been a whistle-stop introduction to fitting mortality models in `R`
+
+- Useful example for using **StMoMo** in the package vignette at
+https://cran.r-project.org/web/packages/StMoMo/vignettes/StMoMoVignette.pdf 
+    - Also, references within this useful for understanding more about mortality models
+    
+-  Useful examples of integrating **StMoMo** with **lifecontingencies** at https://rdrr.io/cran/lifecontingencies/f/inst/doc/mortality_projection.pdf    
+
+# Summary
+
+* **StMoMo provides** easy implementation and comparison of a wide range of models making it useful for:
+    * Actuaries analysing longevity risk $\leadsto$ Model risk
+    * Use in the classroom
+
+- Standard packages are starting point – however, to go beyond them you need to understand the principles behind their operation
+
+# Work in progress
+
+- Available in the development version and expected to be released in next six months  
+    - Selection of models using cross-validation
+    - Construction of models using regularisation techniques
+
+* Sister packages **iMoMo** for mortality improvement rate modelling
+    - Expected to be released in the next year
+    
+- Other development plans
+    - Multipopulation models
+    - Model combination 
+    
+----
+
+\vspace{3cm}
+\begin{center}
+\text{{\Huge\color{CEPAR}Cross validation and regularisation of mortality models }}
+\end{center}
+\vspace{3cm}
+
+
+
+# Mortality Models: Key research questions
+
+1. What model features are desired for different applications?
+
+\vspace{0.5cm}
+
+2. Why do we only consider a fixed set of models?
+
+\vspace{0.5cm}
+
+3. How can we be confident we have selected the best model?
+
+# Objective
+
+Provide a comprehensive framework to **construct**, **select**, and **evaluate** discrete-time mortality models for forecasting applications, using various **statistical learning** and predictive analytics techniques.
+
+- **Construction** based on regularisation techniques
+
+- **Selection** based on cross-validation techniques
+
+
+# Selection of mortality models using cross validation
+
+\begin{figure}[h]
+\centerline{\animategraphics[width=8.0cm, autoplay, loop]{2}{FiguresSL/cv}{4}{4}}
+\end{figure}
+\vspace{-1cm}
+
+- \textbf{Training/Test Set}
+
+- \textbf{Test Set Width}: Depending on forecasting Horizon
+
+- \textbf{Metric}: MSE on the test set
+
+
+# Selection of mortality models using cross validation
+
+\begin{figure}[h]
+\centerline{\animategraphics[width=8.0cm, autoplay, loop]{2}{FiguresSL/cv}{4}{16}}
+\end{figure}
+\vspace{-1cm}
+
+- \textbf{Training/Test Set}
+
+- \textbf{Test Set Width}: Depending on forecasting Horizon
+
+- \textbf{Metric}: MSE on the test set
+
+# Selection of mortality models using cross validation
+
+```{r cv1, eval=TRUE, cache=TRUE, results='hide', dependson=c("defineAll", "defineAUSdata"), warning=FALSE}
+# install.packages("devtools")
+# devtools::install_github("amvillegas/StMoMo", 
+#                            ref = "GroupLasso")
+
+#CV for 1 year ahead     
+LCcv1 <- cv.StMoMo(LC, h = 1, data=USmale, ages.train=ages.fit,  
+             years.train=years.fit, type = "logrates")
+APCcv1 <- cv.StMoMo(APC, h = 1, data=USmale, ages.train=ages.fit,  
+             years.train=years.fit, type = "logrates")
+CBDcv1 <- cv.StMoMo(CBD, h = 1, data=USmale, ages.train=ages.fit,  
+             years.train=years.fit, type = "logrates")
+M7cv1 <- cv.StMoMo(M7, h = 1, data=USmale, ages.train=ages.fit,  
+             years.train=years.fit, type = "logrates")
+```
+
+# Selection of mortality models using cross validation
+
+```{r cv10, eval=TRUE, cache=TRUE, results='hide', dependson=c("defineAll", "defineAUSdata"), warning=FALSE}
+
+#CV for 10 year ahead     
+LCcv10 <- cv.StMoMo(LC, h = 10, data=USmale, ages.train=ages.fit,  
+             years.train=years.fit, type = "logrates")
+APCcv10 <- cv.StMoMo(APC, h = 10, data=USmale, ages.train=ages.fit,  
+             years.train=years.fit, type = "logrates")
+CBDcv10 <- cv.StMoMo(CBD, h = 10, data=USmale, ages.train=ages.fit,  
+             years.train=years.fit, type = "logrates")
+M7cv10 <- cv.StMoMo(M7, h = 10, data=USmale, ages.train=ages.fit,  
+             years.train=years.fit, type = "logrates")
+```
+
+# Selection of mortality models using cross validation
+
+```{r cvShow, eval=TRUE, cache=TRUE, dependson=c("cv10", "cv1"), warning=FALSE}
+LCcv1$cv.mse
+LCcv10$cv.mse
+```
+
+\vspace{-0.5cm}
+
+```{r roundCV, eval=TRUE, echo=FALSE, cache=FALSE}
+#Compute residuals
+CV <- function(x) sprintf("%.4f", x$cv.mse)
+```
+
+. . .
+
+    
+Criterion              |  LC              |  APC                |  CBD            | M7                  
+---------------------- | ---------------- |-------------------- |-----------------|--------------------- 
+*AIC*                  | `r IC(LCfit )`   | `r IC(APCfit)`      | `r IC(CBDfit)`  | **`r IC(M7fit )`** 
+*BIC*                  | `r IC2(LCfit )`  | `r IC2(APCfit)`     | `r IC2(CBDfit)` | **`r IC2(M7fit )`**   
+*CV 1-year*            | `r CV(LCcv1 )`   | `r CV(APCcv1 )`     | `r CV(CBDcv1 )` | **`r CV(M7cv1 )`**   
+*CV 10-year*           | `r CV(LCcv10)`   | **`r CV(APCcv10)`** | `r CV(CBDcv10)` | `r CV(M7cv10)`   
+
+
+# Construction: "Formalised" Model-Building Framework 
+
+We start with a \textbf{huge} model,
+
+\begin{equation*} 
+\ln(\mu_{x,t}) = \alpha_{x} + \sum_{i=1}^{B} f^{(i)}(x) \kappa_{t}^{(i)} + \gamma_{t-x},
+\label{eq: GAPC Predictor Structure}
+\end{equation*}
+
+where the suite of basis functions $(f^{(i)}(x))$ included are:
+
+\begin{equation} 
+f^{(i)}(x) =
+\begin{cases}
+1, & \text{Unit }  \\
+(x-\bar{x})^n & \text{Polynomial } \\
+(x-n)^+ & \text{Call } \\
+(n-x)^+ & \text{Put } \\
+1_{x<n} & \text{Below } \\
+1_{x>n} & \text{Above } 
+\end{cases}
+.
+\end{equation}
+
+# Construction: Our Model
+
+\begin{figure}
+    \centering
+    \includegraphics[width=12.5cm, trim={0.0cm 0.0cm 0.0cm 0.0cm}, clip]{FiguresSL/functions_landscape.pdf}\\
+\end{figure}
+
+# Construction: GLM Representation
+\begin{equation*}
+\eta_{x,t} = \ln(\mu_{x,t}) = \alpha_x + \sum_{i=1}^B f^{(i)}(x) \kappa_t^{(i)} + \gamma_c,
+\label{eq: Predictor}
+\end{equation*}
+
+can be expressed as a GLM [@Currie2014],
+\begin{equation*}
+\mathbf{\eta} = \mathbf{X \beta} = \sum_{j=0}^{B+1} \mathbf{X}_j \boldsymbol{\beta}_j, \qquad \mathbf{X} = [\mathbf{X_0}:\mathbf{X_{1}}:\mathbf{X_{2}}: ... : \mathbf{X_{B}}: \mathbf{X_{B+1}}],
+\end{equation*}
+
+where,
+\vspace{-0.3cm}
+\begin{equation*}
+\boldsymbol{\beta}=\{\boldsymbol{\beta_i}\}_{i=0}^{B+1}, \quad \boldsymbol{\beta_0}=\{\alpha_x\}_{x=1}^{n_x}, \quad \boldsymbol{\beta_i}=\{\kappa_t^{(i)}\}_{t=1}^{n_t}, \quad \boldsymbol{\beta_{B+1}}=\{\gamma_c\}_{c=1}^{n_c}.
+\end{equation*}
+
+- Estimate parameters with group lasso using the R package **grpreg** [@Breheny2013]
+
+
+
+
+````{r modelDef, echo=FALSE, warning=FALSE, cache=TRUE, message = FALSE}
+
+strikes <- seq(65,85,5)
+bModel <- StMoMo(link = "log-Gaussian", staticAgeFun = TRUE,
+                 periodAgeFun = c("1", genPoly(1:5), genCall(strikes),
+                                  genPut(strikes)),
+                 cohortAgeFun = "1")
+
+ktlabels <- c(substitute(paste("1", ""), list(i = 1)))
+
+for(i in 1:5){
+  ktlabels <- c(ktlabels, substitute(paste("(x-", xbar, ")"^{i}, ""), 
+                                     list(i = i, xbar = mean(ages.fit))))
+}
+for(i in 1:length(strikes)){
+  ktlabels <- c(ktlabels, substitute(paste("(x-", a, ")"^{i}, ""), 
+                                     list(i = "+", a = strikes[i])))
+}
+for(i in 1:length(strikes)){
+  ktlabels <- c(ktlabels, substitute(paste("(", a, "-x)"^{i}, ""), 
+                                     list(i = "+", a = strikes[i])))
+}
+source("AnimationPlots.R")
+
+```
+
+````{r USAMale, echo=FALSE, warning=FALSE, cache=TRUE, dependson = c("modelDef", "defineAll", "defineAUSdata"), message = FALSE, results='hide' }
+
+lambda <- exp(seq(log(0.03), log(0.0005), length.out = 50))
+bMgrpfit <- grpfit(bModel, lambda = lambda, data = USmale, ages.fit = ages.fit,
+                   years.fit = years.fit)
+
+agesplot <- as.character(seq(60,85,5))
+for(j in 1:length(lambda)){
+  pdf(paste("./USAMale/parameters",j,".pdf",sep=""), height=4, width=6.5)
+  plotParamPath(bMgrpfit, j, ktlabels)
+  dev.off()
+  
+  pdf(paste("./USAMale/fit",j,".pdf",sep=""), height=4, width=6.5)
+  plotFitPath(bMgrpfit, j, agesplot)
+  dev.off()
+}
+
+```
+
+
+# Construction: Estimated Parameters (USA Males)
+
+\begin{figure}[h]
+\centerline{\animategraphics[autoplay, width=13.0cm]{6}{"./USAMale/parameters"}{1}{1}}
+\end{figure}
+
+# Construction: Estimated Parameters (USA Males)
+
+\begin{figure}[h]
+\centerline{\animategraphics[autoplay, width=13.0cm]{6}{"./USAMale/parameters"}{1}{18}}
+\end{figure}
+
+
+# Construction: Estimated Parameters (USA Males)
+
+\begin{figure}[h]
+\centerline{\animategraphics[autoplay, width=13.0cm]{6}{"./USAMale/parameters"}{18}{31}}
+\end{figure}
+
+
+# Construction: Estimated Parameters (USA Males)
+
+\begin{figure}[h]
+\centerline{\animategraphics[autoplay, width=13.0cm]{6}{"./USAMale/parameters"}{31}{44}}
+\end{figure}
+
+
+# Construction: Estimated Parameters (USA Males)
+
+\begin{figure}[h]
+\centerline{\animategraphics[autoplay, width=13.0cm]{6}{"./USAMale/parameters"}{44}{50}}
+\end{figure}
+
+
+# Construction: Fitted Values (USA Males)
+
+\begin{figure}[h]
+\centerline{\animategraphics[autoplay, width=13.0cm]{6}{"./USAMale/fit"}{1}{1}}
+\end{figure}
+
+# Construction: Fitted Values (USA Males)
+
+\begin{figure}[h]
+\centerline{\animategraphics[autoplay, width=13.0cm]{6}{"./USAMale/fit"}{1}{18}}
+\end{figure}
+
+
+
+# Construction: Fitted Values (USA Males)
+
+\begin{figure}[h]
+\centerline{\animategraphics[autoplay, width=13.0cm]{6}{"./USAMale/fit"}{18}{31}}
+\end{figure}
+
+
+
+# Construction: Fitted Values (USA Males)
+
+\begin{figure}[h]
+\centerline{\animategraphics[autoplay, width=13.0cm]{6}{"./USAMale/fit"}{31}{44}}
+\end{figure}
+
+# Construction: Fitted Values (USA Males)
+
+\begin{figure}[h]
+\centerline{\animategraphics[autoplay, width=13.0cm]{6}{"./USAMale/fit"}{44}{50}}
+\end{figure}
+
+#Implementation in StMoMo - Define model
+
+\small
+
+```{r defineModel, cache=TRUE, warning=FALSE, echo=TRUE, linewidth = 66}
+#Create big model
+strikes <- seq(65,85,5)
+bModel <- StMoMo(link = "log-Gaussian", staticAgeFun = TRUE, 
+                   periodAgeFun = c("1", genPoly(1:5), genCall(strikes),
+                                    genPut(strikes)),
+                   cohortAgeFun = "1")
+bModel
+```
+
+
+#Implementation in StMoMo - Fit model with grouped penalised regularisation
+
+
+
+```{r fitModel, cache=TRUE, warning=FALSE, echo=TRUE, linewidth = 66, dependson=c("defineModel", "loadData")}
+#lambda grid
+lambda <- exp(seq(log(0.03), log(0.0005), length.out = 50))
+#Penalise all term
+bMgrpfit <- grpfit(bModel, lambda = lambda, data = USmale,
+                   ages.fit = ages.fit, years.fit = years.fit)
+
+```
+
+#Implementation in StMoMo - Parameter paths
+
+```{r plotModel1, eval=TRUE,  fig.width=7.5*1.5, fig.height=3*1.5, out.width="100%", results='hide', warning=FALSE, message=FALSE, cache=TRUE, echo=TRUE, dependson="fitModel"}
+ plot(extractStMoMo(bMgrpfit, 1), nCol = 3)
+```
+
+#Implementation in StMoMo - Parameter paths
+
+```{r plotModel2, eval=TRUE,  fig.width=7.5*1.5, fig.height=3*1.5, out.width="100%", results='hide', warning=FALSE, message=FALSE, cache=TRUE, echo=TRUE, dependson="fitModel"}
+ plot(extractStMoMo(bMgrpfit, 17), nCol = 3)
+```
+
+#Implementation in StMoMo - Parameter paths
+
+```{r plotModel3, eval=TRUE,  fig.width=7.5*1.5, fig.height=3*1.5, out.width="100%", results='hide', warning=FALSE, message=FALSE, cache=TRUE, echo=TRUE, dependson="fitModel"}
+ plot(extractStMoMo(bMgrpfit, 30), nCol = 3)
+```
+
+#Implementation in StMoMo - Parameter paths
+
+```{r plotModel4, eval=TRUE,  fig.width=7.5*1.5, fig.height=3*1.5, out.width="100%", results='hide', warning=FALSE, message=FALSE, cache=TRUE, echo=TRUE, dependson="fitModel"}
+ plot(extractStMoMo(bMgrpfit, 40), nCol = 5)
+```
+
+<!-- #Implementation in StMoMo - Select with crossvalidation -->
+
+<!-- ```{r cvModel, cache=TRUE, warning=FALSE, echo=TRUE, linewidth = 66, dependson=c("defineModel", "loadData"), results='hide'} -->
+<!-- #Penalise all term -->
+<!-- bMgrpcv1 <- cv.grpStMoMo(bModel, h = 1, lambda = lambda, -->
+<!--                          data = USmale, ages.train = ages.fit,  -->
+<!--                          years.train = years.fit,  -->
+<!--                          type = "logrates") -->
+<!-- bMgrpcv10 <- cv.grpStMoMo(bModel, h = 10, lambda = lambda, -->
+<!--                          data = USmale, ages.train = ages.fit,  -->
+<!--                          years.train = years.fit,  -->
+<!--                          type = "logrates") -->
+<!-- ``` -->
+
+<!-- #Implementation in StMoMo - Select with crossvalidation -->
+
+<!-- ```{r cvBest, cache=TRUE, warning=FALSE, echo=TRUE, linewidth = 66, dependson=c("cvModel")} -->
+<!-- #Best model for 1 year -->
+<!-- bMgrpcv1$min -->
+<!-- bMgrpcv1$lambda.min	 -->
+
+<!-- #Best model for 10 year -->
+<!-- bMgrpcv10$min -->
+<!-- bMgrpcv10$lambda.min	 -->
+<!-- ``` -->
+
+
+----
+
+\vspace{3cm}
+\begin{center}
+\text{{\Huge\color{CEPAR}Improvement rate modelling}}
+\end{center}
+\vspace{3cm}
+
+
+# The APCi model
+
+- Modelling improvement rates rather than mortality rates is becoming commong 
+- Consider the APCi model which corresponds broadly to the  lates CMI projection approach:
+
+$$-\log \frac{\mu_{xt}}{\mu_{x,t-1}} = \alpha_x  + \kappa_t + \gamma_{t-x}$$
+
+# Implementation in **iMoMo**
+
+```{r fitapci, eval=TRUE, cache=TRUE, dependson=c("defineAll", "defineAUSdata"), warning=FALSE}
+library(iMoMo) #Not yet publicly available
+#Define model
+APCi <- apci()
+APCi
+
+#fit the model
+APCifit <- fit(APCi, data=USmale, ages.fit=ages.fit,  
+              years.fit=years.fit)
+```
+
+# Implementation in **iMoMo**
+
+```{r plotAPCi, eval=TRUE,  fig.width=8, fig.height=5.5, out.width="10cm", fig.align='center',  results='hide', warning=FALSE, message=FALSE, cache=TRUE, echo=TRUE, dependson= c("defineAUSdata", "fitapci")}
+ plot(APCifit, parametricbx = FALSE)
+```
+
+
+
+----
+$$\text{{\color{white} x}}$$
+
+
+http://cran.r-project.org/web/packages/StMoMo/
+https://github.com/amvillegas/StMoMo
+$$\text{{\color{white} x}}$$
+\begin{center}
+\text{{\Huge\textbf{Thank you!}}}
+\end{center}
+$$\text{{\color{white} x}}$$
+a.villegas@unsw.edu.au
+
+andresmauriciovillegas@gmail.com
+\begin{flushright}
+\includegraphics[width = 5cm]{logocepar.png}
+\end{flushright}
+
+
+
+# References {.allowframebreaks}
