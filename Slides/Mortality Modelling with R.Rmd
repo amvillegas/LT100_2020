@@ -51,6 +51,23 @@ knit_hooks$set(output = function(x, options) {
 })
 ```
 
+
+----
+
+\vspace{3cm}
+
+\centering
+
+
+\text{{\Huge\color{CEPAR} Slides Available at:}}
+
+\LARGE
+
+https://github.com/amvillegas/LT100_2020
+
+\vspace{3cm}
+
+
 # Aims
 
 Gain familiarity with use of the `R` packages **demography**, **StMoMo** and **lifecontingencies** to:
@@ -1806,7 +1823,7 @@ $$\text{{\color{white} x}}$$
 
 
 http://cran.r-project.org/web/packages/StMoMo/
-https://github.com/amvillegas/StMoMo
+https://github.com/amvillegas
 $$\text{{\color{white} x}}$$
 \begin{center}
 \text{{\Huge\textbf{Thank you!}}}
